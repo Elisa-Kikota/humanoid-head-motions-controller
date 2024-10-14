@@ -1,15 +1,10 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
 class SelectBondedDevicePage extends StatefulWidget {
-  final bool checkAvailability;
-  final Function onChatPage;
+  final Function(BluetoothDevice) onDeviceSelected;
 
-  const SelectBondedDevicePage({
-    this.checkAvailability = true,
-    required this.onChatPage,
-  });
+  const SelectBondedDevicePage({Key? key, required this.onDeviceSelected}) : super(key: key);
 
   @override
   _SelectBondedDevicePageState createState() => _SelectBondedDevicePageState();
@@ -41,33 +36,37 @@ class _SelectBondedDevicePageState extends State<SelectBondedDevicePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Expanded(
-          child: ListView(
-            children: devices
-                .map(
-                  (device) => ListTile(
-                    title: Text(device.name ?? "Unknown device"),
-                    subtitle: Text(device.address.toString()),
-                    trailing: ElevatedButton(
-                      child: Text('Connect'),
-                      onPressed: () => widget.onChatPage(device),
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Select Device'),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.refresh),
+            onPressed: _startDiscovery,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView(
+              children: devices
+                  .map(
+                    (device) => ListTile(
+                      title: Text(device.name ?? "Unknown device"),
+                      subtitle: Text(device.address.toString()),
+                      onTap: () => widget.onDeviceSelected(device),
                     ),
-                  ),
-                )
-                .toList(),
+                  )
+                  .toList(),
+            ),
           ),
-        ),
-        if (_isDiscovering)
-          Center(
-            child: CircularProgressIndicator(),
-          ),
-        ElevatedButton(
-          child: Text('Refresh'),
-          onPressed: _startDiscovery,
-        ),
-      ],
+          if (_isDiscovering)
+            Center(
+              child: CircularProgressIndicator(),
+            ),
+        ],
+      ),
     );
   }
 }

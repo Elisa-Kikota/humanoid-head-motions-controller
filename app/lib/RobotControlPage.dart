@@ -1,54 +1,47 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
-import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 
 class RobotControlPage extends StatefulWidget {
   final BluetoothDevice server;
+  final VoidCallback onDisconnect;
 
-  const RobotControlPage({Key? key, required this.server}) : super(key: key);
+  const RobotControlPage({Key? key, required this.server, required this.onDisconnect}) : super(key: key);
 
   @override
   _RobotControlPageState createState() => _RobotControlPageState();
 }
 
-class _RobotControlPageState extends State<RobotControlPage> with SingleTickerProviderStateMixin {
+class _RobotControlPageState extends State<RobotControlPage> {
   BluetoothConnection? connection;
   bool isConnecting = true;
   bool get isConnected => connection != null && connection!.isConnected;
   bool isDisconnecting = false;
 
-  bool _underRaspberryPi = false;
-  late AnimationController _animationController;
-  late Animation<double> _animation;
+  bool _underAutoControl = false;
+  Timer? _heartbeatTimer;
+  bool _pongReceived = false;
 
-  double _lateralPosition = 90;
-  double _eyeVerticalPosition = 90;
-  double _eyeHorizontalPosition = 90;
-  double _noddingPosition = 90;
-  double _jawPosition = 90;
+  double _lateralPosition = 0.5;
+  double _eyeVerticalPosition = 0.5;
+  double _eyeHorizontalPosition = 0.5;
+  double _noddingPosition = 0.5;
+  double _jawPosition = 0.5;
 
-  Color _currentColor = Colors.green;
+  Color _currentColor = Colors.blue;
 
   @override
   void initState() {
     super.initState();
     _connectToDevice();
-
-    _animationController = AnimationController(
-      duration: const Duration(milliseconds: 500),
-      vsync: this,
-    );
-    _animation = CurvedAnimation(
-      parent: _animationController,
-      curve: Curves.easeInOut,
-    );
+    _startHeartbeat();
   }
 
   @override
   void dispose() {
-    _animationController.dispose();
+    _heartbeatTimer?.cancel();
     if (isConnected) {
       isDisconnecting = true;
       connection?.dispose();
@@ -65,10 +58,78 @@ class _RobotControlPageState extends State<RobotControlPage> with SingleTickerPr
         isConnecting = false;
         isDisconnecting = false;
       });
+      _listenForDisconnection();
     }).catchError((error) {
       print('Cannot connect, exception occurred');
       print(error);
     });
+  }
+
+  void _listenForDisconnection() {
+    connection?.input?.listen(
+      (Uint8List data) {
+        // Handle incoming data
+        _handleIncomingData(utf8.decode(data));
+      },
+      onDone: () {
+        // The connection has been closed
+        _handleDisconnection();
+      },
+      onError: (error) {
+        // An error occurred
+        print('Error: $error');
+        _handleDisconnection();
+      },
+    );
+  }
+
+  void _handleDisconnection() {
+    setState(() {
+      isConnecting = false;
+      connection = null;
+    });
+    widget.onDisconnect();
+  }
+
+  void _attemptReconnection() {
+    setState(() {
+      isConnecting = true;
+    });
+    BluetoothConnection.toAddress(widget.server.address).then((_connection) {
+      print('Reconnected to the device');
+      connection = _connection;
+      setState(() {
+        isConnecting = false;
+      });
+      _listenForDisconnection();
+    }).catchError((error) {
+      print('Cannot reconnect, exception occurred');
+      setState(() {
+        isConnecting = false;
+      });
+    });
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer = Timer.periodic(Duration(seconds: 5), (timer) {
+      if (isConnected) {
+        _sendCommand('PING');
+        // Start a timeout timer
+        Timer(Duration(seconds: 2), () {
+          if (!_pongReceived) {
+            // Connection lost
+            _handleDisconnection();
+          }
+        });
+      }
+    });
+  }
+
+  void _handleIncomingData(String data) {
+    if (data.trim() == 'PONG') {
+      _pongReceived = true;
+    }
+    // Handle other incoming data
   }
 
   void _sendCommand(String command) {
@@ -89,23 +150,18 @@ class _RobotControlPageState extends State<RobotControlPage> with SingleTickerPr
 
   void _toggleControl() {
     setState(() {
-      _underRaspberryPi = !_underRaspberryPi;
-      if (_underRaspberryPi) {
-        _animationController.forward();
-      } else {
-        _animationController.reverse();
-      }
+      _underAutoControl = !_underAutoControl;
     });
     _sendCommand('TOGGLE_CONTROL');
   }
 
   void _resetServos() {
     setState(() {
-      _lateralPosition = 90;
-      _eyeVerticalPosition = 90;
-      _eyeHorizontalPosition = 90;
-      _noddingPosition = 90;
-      _jawPosition = 90;
+      _lateralPosition = 0.5;
+      _eyeVerticalPosition = 0.5;
+      _eyeHorizontalPosition = 0.5;
+      _noddingPosition = 0.5;
+      _jawPosition = 0.5;
     });
     _sendCommand('RESET');
   }
@@ -115,27 +171,61 @@ class _RobotControlPageState extends State<RobotControlPage> with SingleTickerPr
     _sendCommand('RGB,${color.red},${color.green},${color.blue}');
   }
 
-  Widget _buildSlider(String label, String command, double value, Function(double) onChanged) {
+  Widget _buildColorButton(Color color, String label) {
+    return ElevatedButton(
+      child: Text(label),
+      style: ElevatedButton.styleFrom(backgroundColor: color),
+      onPressed: () => _changeColor(color),
+    );
+  }
+
+  Widget _buildControlSlider(String label, String command, double value, Function(double) onChanged, {Widget? leftIcon, Widget? rightIcon}) {
     return Opacity(
-      opacity: _underRaspberryPi ? 0.5 : 1.0,
+      opacity: _underAutoControl ? 0.5 : 1.0,
       child: AbsorbPointer(
-        absorbing: _underRaspberryPi,
-        child: Column(
+        absorbing: _underAutoControl,
+        child: Row(
           children: [
-            Text(label, style: TextStyle(fontSize: 16)),
-            Slider(
-              value: value,
-              min: 0,
-              max: 180,
-              divisions: 180,
-              label: value.round().toString(),
-              onChanged: (newValue) {
-                setState(() {
-                  onChanged(newValue);
-                });
-                _sendCommand('$command,${newValue.round()}');
-              },
+            if (leftIcon != null) leftIcon,
+            Expanded(
+              child: Column(
+                children: [
+                  Text(label, style: TextStyle(fontSize: 16, color: Colors.white)),
+                  Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Container(
+                        height: 4,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [Colors.blue.shade900, Colors.blue, Colors.blue.shade900],
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        left: value * MediaQuery.of(context).size.width * 0.7,
+                        child: Container(
+                          width: 20,
+                          height: 20,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.blue.withOpacity(0.5),
+                                spreadRadius: 2,
+                                blurRadius: 5,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
+            if (rightIcon != null) rightIcon,
           ],
         ),
       ),
@@ -147,6 +237,7 @@ class _RobotControlPageState extends State<RobotControlPage> with SingleTickerPr
     return Scaffold(
       appBar: AppBar(
         title: Text('Robot Head Control'),
+        backgroundColor: Colors.blue.shade900,
         actions: [
           IconButton(
             icon: Icon(Icons.refresh),
@@ -154,74 +245,90 @@ class _RobotControlPageState extends State<RobotControlPage> with SingleTickerPr
           ),
         ],
       ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              AnimatedBuilder(
-                animation: _animation,
-                builder: (context, child) {
-                  return Transform.rotate(
-                    angle: _animation.value * 2 * 3.14159,
-                    child: Image.asset('assets/robot_head.png', width: 200, height: 200),
-                  );
-                },
-              ),
-              SizedBox(height: 20),
-              Text('Connected to: ${widget.server.name ?? "Unknown"}',
-                  style: TextStyle(fontSize: 18)),
-              SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text('App Control'),
-                  Switch(
-                    value: _underRaspberryPi,
-                    onChanged: (value) => _toggleControl(),
-                  ),
-                  Text('RaspberryPi Control'),
-                ],
-              ),
-              SizedBox(height: 20),
-              _buildSlider('Lateral', 'L', _lateralPosition, (value) => _lateralPosition = value),
-              _buildSlider('Eye Vertical', 'V', _eyeVerticalPosition, (value) => _eyeVerticalPosition = value),
-              _buildSlider('Eye Horizontal', 'H', _eyeHorizontalPosition, (value) => _eyeHorizontalPosition = value),
-              _buildSlider('Nodding', 'N', _noddingPosition, (value) => _noddingPosition = value),
-              _buildSlider('Jaw', 'J', _jawPosition, (value) => _jawPosition = value),
-              SizedBox(height: 20),
-              ElevatedButton(
-                child: Text('Change LED Color'),
-                onPressed: () {
-                  showDialog(
-                    context: context,
-                    builder: (BuildContext context) {
-                      return AlertDialog(
-                        title: const Text('Pick a color'),
-                        content: SingleChildScrollView(
-                          child: ColorPicker(
-                            pickerColor: _currentColor,
-                            onColorChanged: _changeColor,
-                            showLabel: true,
-                            pickerAreaHeightPercent: 0.8,
-                          ),
-                        ),
-                        actions: <Widget>[
-                          ElevatedButton(
-                            child: const Text('Done'),
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                            },
-                          ),
-                        ],
-                      );
-                    },
-                  );
-                },
-              ),
-            ],
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.blue.shade900, Colors.black],
           ),
         ),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                _buildConnectionStatus(),
+                SizedBox(height: 20),
+                Text('Connected to: ${widget.server.name ?? "Unknown"}',
+                    style: TextStyle(fontSize: 18, color: Colors.white)),
+                SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('App Control', style: TextStyle(color: Colors.white)),
+                    Switch(
+                      value: _underAutoControl,
+                      onChanged: (value) => _toggleControl(),
+                      activeColor: Colors.blue,
+                    ),
+                    Text('Auto Control', style: TextStyle(color: Colors.white)),
+                  ],
+                ),
+                SizedBox(height: 20),
+                _buildControlSlider('Lateral', 'L', _lateralPosition, (value) {
+                  setState(() => _lateralPosition = value);
+                  _sendCommand('L,${(value * 180).round()}');
+                }, leftIcon: Icon(Icons.arrow_left, color: Colors.white), rightIcon: Icon(Icons.arrow_right, color: Colors.white)),
+                SizedBox(height: 10),
+                _buildControlSlider('Eye Vertical', 'V', _eyeVerticalPosition, (value) {
+                  setState(() => _eyeVerticalPosition = value);
+                  _sendCommand('V,${(value * 180).round()}');
+                }, leftIcon: Icon(Icons.arrow_upward, color: Colors.white), rightIcon: Icon(Icons.arrow_downward, color: Colors.white)),
+                SizedBox(height: 10),
+                _buildControlSlider('Eye Horizontal', 'H', _eyeHorizontalPosition, (value) {
+                  setState(() => _eyeHorizontalPosition = value);
+                  _sendCommand('H,${(value * 180).round()}');
+                }, leftIcon: Icon(Icons.arrow_left, color: Colors.white), rightIcon: Icon(Icons.arrow_right, color: Colors.white)),
+                SizedBox(height: 10),
+                _buildControlSlider('Nodding', 'N', _noddingPosition, (value) {
+                  setState(() => _noddingPosition = value);
+                  _sendCommand('N,${(value * 180).round()}');
+                }),
+                SizedBox(height: 10),
+                _buildControlSlider('Jaw', 'J', _jawPosition, (value) {
+                  setState(() => _jawPosition = value);
+                  _sendCommand('J,${(value * 180).round()}');
+                }, leftIcon: Icon(Icons.compress, color: Colors.white), rightIcon: Icon(Icons.open_in_full, color: Colors.white)),
+                SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _buildColorButton(Colors.blue, 'Blue'),
+                    _buildColorButton(Colors.green, 'Green'),
+                    _buildColorButton(Colors.yellow, 'Yellow'),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConnectionStatus() {
+    return Container(
+      padding: EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: isConnected ? Colors.green : Colors.red,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        isConnected ? 'Connected' : 'Disconnected',
+        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        textAlign: TextAlign.center,
       ),
     );
   }
